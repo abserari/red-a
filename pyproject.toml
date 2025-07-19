@@ -15,4 +15,5 @@ dependencies = [
     "openpyxl",
     "pandasai>=3.0.0b2",
     "akshare>=1.14.0",
+    "pymongo>=4.0.0",
 ]
