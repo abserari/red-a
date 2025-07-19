@@ -7,7 +7,12 @@ requires-python = ">=3.11"
 dependencies = [
     "jupyterlab",
     "pandas",
+    "numpy",
     "matplotlib",
+    "seaborn",
     "scikit-learn",
-    "ipykernel"
+    "ipykernel",
+    "openpyxl",
+    "pandasai>=3.0.0b2",
+    "akshare>=1.14.0",
 ]

@@ -10,6 +10,8 @@ source .venv/bin/activate
 
 # 确保你已在激活的环境中 (.venv)
 
+uv pip sync pyproject.toml
+
 # 1. 使用 uv pip install 安装核心库
 # uv 的依赖解析和安装速度远超传统 pip
 uv pip install jupyterlab pandas matplotlib scikit-learn ipykernel
