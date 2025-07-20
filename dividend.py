@@ -360,6 +360,92 @@ def calculate_dividend_yield(total_cash_12m, stock_price):
     return None
 
 
+def calculate_dynamic_dividend_yield(code, check_date):
+    """
+    计算动态股息率 - 使用过去12个月的分红数据和当前股价
+    
+    Args:
+        code (str): 股票代码，格式如 'sh.600519'
+        check_date (str): 检查日期，格式 'YYYY-MM-DD'
+    
+    Returns:
+        dict: 包含动态股息率信息的字典
+        
+    调用示例:
+        result = calculate_dynamic_dividend_yield('sh.603565', '2024-07-01')
+        # 返回: {
+        #     'yield_percentage': 8.71,
+        #     'total_dividend_12m': 0.72,
+        #     'stock_price': 8.26,
+        #     'price_date': datetime(2024, 7, 1),
+        #     'dividend_count': 1,
+        #     'dividend_details': [{
+        #         'date': datetime(2024, 4, 30),
+        #         'amount': 0.72
+        #     }]
+        # }
+        
+        # 无分红情况
+        result = calculate_dynamic_dividend_yield('sh.000001', '2024-07-01')
+        # 返回: {'error': '过去12个月无分红'}
+    """
+    check_date_obj = pd.to_datetime(check_date)
+    
+    # 获取过去两年的分红数据以确保覆盖12个月
+    year1 = check_date_obj.year
+    year2 = check_date_obj.year - 1
+    
+    dividend_df = fetch_dividend_data(code, [year1, year2])
+    if dividend_df is None:
+        return {'error': '无分红数据'}
+    
+    # 识别字段
+    date_field, cash_field = identify_dividend_fields(dividend_df)
+    if not date_field or not cash_field:
+        return {'error': '无法识别必要字段'}
+    
+    # 筛选过去12个月的分红
+    dividend_df_12m, total_cash_12m = filter_12month_dividends(
+        dividend_df, date_field, cash_field, check_date
+    )
+    
+    # 获取当前股价
+    price_data = fetch_stock_price(code, check_date)
+    if price_data is None:
+        return {'error': '无价格数据'}
+    
+    # 如果过去12个月无分红
+    if total_cash_12m == 0:
+        return {
+            'yield_percentage': 0,
+            'total_dividend_12m': 0,
+            'stock_price': price_data['close'],
+            'price_date': price_data['date'],
+            'dividend_count': 0,
+            'dividend_details': []
+        }
+    
+    # 计算股息率
+    yield_percentage = calculate_dividend_yield(total_cash_12m, price_data['close'])
+    
+    # 获取分红明细
+    dividend_details = []
+    for _, row in dividend_df_12m.iterrows():
+        dividend_details.append({
+            'date': row[date_field],
+            'amount': row[cash_field]
+        })
+    
+    return {
+        'yield_percentage': yield_percentage,
+        'total_dividend_12m': total_cash_12m,
+        'stock_price': price_data['close'],
+        'price_date': price_data['date'],
+        'dividend_count': len(dividend_df_12m),
+        'dividend_details': dividend_details
+    }
+
+
 def calculate_comprehensive_dividend_yield(code, check_date):
     """
     综合计算股息率 - 同时返回动态和静态股息率
@@ -406,29 +492,16 @@ def calculate_comprehensive_dividend_yield(code, check_date):
     }
     
     # 计算动态股息率（过去12个月）
-    year1 = check_date_obj.year
-    year2 = check_date_obj.year - 1
+    dynamic_result = calculate_dynamic_dividend_yield(code, check_date)
     
-    dividend_df = fetch_dividend_data(code, [year1, year2])
-    if dividend_df is not None:
-        date_field, cash_field = identify_dividend_fields(dividend_df)
-        
-        if date_field and cash_field:
-            # 动态股息率
-            dividend_df_12m, total_cash_12m = filter_12month_dividends(
-                dividend_df, date_field, cash_field, check_date
-            )
-            
-            price_data = fetch_stock_price(code, check_date)
-            if price_data:
-                dynamic_yield = calculate_dividend_yield(total_cash_12m, price_data['close'])
-                result['dynamic_yield'] = {
-                    'yield_percentage': dynamic_yield,
-                    'total_dividend_12m': total_cash_12m,
-                    'stock_price': price_data['close'],
-                    'price_date': price_data['date'],
-                    'dividend_count': len(dividend_df_12m)
-                }
+    if 'error' not in dynamic_result and dynamic_result['yield_percentage'] is not None:
+        result['dynamic_yield'] = {
+            'yield_percentage': dynamic_result['yield_percentage'],
+            'total_dividend_12m': dynamic_result['total_dividend_12m'],
+            'stock_price': dynamic_result['stock_price'],
+            'price_date': dynamic_result['price_date'],
+            'dividend_count': dynamic_result['dividend_count']
+        }
     
     # 计算静态股息率（当年）
     current_year = check_date_obj.year
@@ -534,56 +607,59 @@ def test_static_dividend_yield(code, year):
             print(f"      - 单次股息率: {div['static_yield']:.2f}%")
 
 
-# 测试动态股息率（过去12个月）
-print("="*60)
-print("动态股息率测试（过去12个月）")
-print("="*60)
 
-test_cases = [
-    ("sh.603866", "2024-07-01"),  
-    ("sh.603565", "2024-07-01"), 
-]
+# 使用示例
+if __name__ == "__main__":
+    # 测试动态股息率（过去12个月）
+    print("="*60)
+    print("动态股息率测试（过去12个月）")
+    print("="*60)
 
-for code, date in test_cases:
-    test_dividend_yield_calculation(code, date)
+    test_cases = [
+        ("sh.603866", "2024-07-01"),  
+        # ("sh.603565", "2024-07-01"), 
+    ]
 
-# 测试静态股息率（指定年份）
-print("\n" + "="*60)
-print("静态股息率测试（指定年份）")
-print("="*60)
+    for code, date in test_cases:
+        test_dividend_yield_calculation(code, date)
 
-static_test_cases = [
-    ("sh.603866", 2024),
-    ("sh.603565", 2024),
-]
+    # 测试静态股息率（指定年份）
+    # print("\n" + "="*60)
+    # print("静态股息率测试（指定年份）")
+    # print("="*60)
 
-for code, year in static_test_cases:
-    test_static_dividend_yield(code, year)
+    # static_test_cases = [
+    #     ("sh.603866", 2024),
+    #     ("sh.603565", 2024),
+    # ]
 
-# 测试综合股息率计算
-print("\n" + "="*60)
-print("综合股息率测试（动态+静态）")
-print("="*60)
+    # for code, year in static_test_cases:
+    #     test_static_dividend_yield(code, year)
 
-comprehensive_test_cases = [
-    ("sh.603565", "2024-07-01"),
-    ("sh.600519", "2023-07-01"),
-]
+    # # 测试综合股息率计算
+    # print("\n" + "="*60)
+    # print("综合股息率测试（动态+静态）")
+    # print("="*60)
 
-for code, date in comprehensive_test_cases:
-    print(f"\n{code} 在 {date} 的综合股息率分析：")
-    result = calculate_comprehensive_dividend_yield(code, date)
-    
-    print(f"  动态股息率（过去12个月）:")
-    if result['dynamic_yield']:
-        print(f"    - 股息率: {result['dynamic_yield']['yield_percentage']:.2f}%")
-        print(f"    - 12个月分红总额: {result['dynamic_yield']['total_dividend_12m']:.4f}")
-        print(f"    - 当前股价: {result['dynamic_yield']['stock_price']:.2f}")
-    else:
-        print("    - 无数据")
-    
-    print(f"  静态股息率（{pd.to_datetime(date).year}年）:")
-    if result['static_yield']:
-        print(f"    - 股息率: {result['static_yield']['yield_percentage']:.2f}%")
-        print(f"    - 年度分红总额: {result['static_yield']['total_dividend']:.4f}")
-        print(f"    - 基准股价: {result['static_yield']['base_price']:.2f}")
+    # comprehensive_test_cases = [
+    #     ("sh.603565", "2024-07-01"),
+    #     ("sh.600519", "2023-07-01"),
+    # ]
+
+    # for code, date in comprehensive_test_cases:
+    #     print(f"\n{code} 在 {date} 的综合股息率分析：")
+    #     result = calculate_comprehensive_dividend_yield(code, date)
+        
+    #     print(f"  动态股息率（过去12个月）:")
+    #     if result['dynamic_yield']:
+    #         print(f"    - 股息率: {result['dynamic_yield']['yield_percentage']:.2f}%")
+    #         print(f"    - 12个月分红总额: {result['dynamic_yield']['total_dividend_12m']:.4f}")
+    #         print(f"    - 当前股价: {result['dynamic_yield']['stock_price']:.2f}")
+    #     else:
+    #         print("    - 无数据")
+        
+    #     print(f"  静态股息率（{pd.to_datetime(date).year}年）:")
+    #     if result['static_yield']:
+    #         print(f"    - 股息率: {result['static_yield']['yield_percentage']:.2f}%")
+    #         print(f"    - 年度分红总额: {result['static_yield']['total_dividend']:.4f}")
+    #         print(f"    - 基准股价: {result['static_yield']['base_price']:.2f}")
