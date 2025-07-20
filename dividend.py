@@ -1,16 +1,49 @@
 import baostock as bs
 import pandas as pd
 from datetime import datetime, timedelta
+import logging
+import threading
+import sys
+
+# 配置日志
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # 设置pandas显示选项
 pd.set_option('display.max_columns', None)
 pd.set_option('display.max_rows', 20)
 pd.set_option('display.width', None)
 
-# 登录系统
-result = bs.login()
-print('login respond error_code:' + result.error_code)
-print('login respond error_msg:' + result.error_msg)
+# 创建一个全局锁来保护 BaoStock API 调用
+baostock_lock = threading.Lock()
+
+# 全局变量，标记是否已登录
+_baostock_logged_in = False
+
+def ensure_baostock_login():
+    """确保 BaoStock 已登录"""
+    global _baostock_logged_in
+    if not _baostock_logged_in:
+        with baostock_lock:
+            if not _baostock_logged_in:  # 双重检查
+                result = bs.login()
+                logger.info(f'login respond error_code: {result.error_code}')
+                logger.info(f'login respond error_msg: {result.error_msg}')
+                _baostock_logged_in = True
+                return result
+    return None
+
+# 如果是直接运行或导入，先登录一次
+if __name__ == "__main__" or not hasattr(sys.modules[__name__], '__file__'):
+    ensure_baostock_login()
+else:
+    # 延迟登录，让多进程环境下每个进程自己登录
+    import os
+    if os.environ.get('BAOSTOCK_AUTO_LOGIN', '1') == '1':
+        ensure_baostock_login()
 
 def fetch_dividend_data(code, years):
     """
@@ -36,26 +69,52 @@ def fetch_dividend_data(code, years):
         # - dividRegistDate: 股权登记日
         # - dividPayDate: 派息日
     """
+    ensure_baostock_login()  # 确保已登录
+    
     all_dividends = []
     fields = None
     
     for year in years:
-        rs_dividend = bs.query_dividend_data(code=code, year=str(year))
-        
-        if rs_dividend.error_code == '0':
-            fields = rs_dividend.fields
+        try:
+            # 尝试查询分红数据，处理可能的 IndexError
+            try:
+                with baostock_lock:
+                    rs_dividend = bs.query_dividend_data(code=code, year=str(year))
+            except IndexError as e:
+                logger.warning(f"BaoStock IndexError for dividend data {code} in {year}, skipping")
+                continue
             
-        dividend_list = []
-        while (rs_dividend.error_code == '0') & rs_dividend.next():
-            dividend_list.append(rs_dividend.get_row_data())
-        
-        if dividend_list:
-            all_dividends.extend(dividend_list)
+            if rs_dividend.error_code == '0' and rs_dividend.fields:
+                # 只在第一次设置fields，或者验证fields一致
+                if fields is None:
+                    fields = rs_dividend.fields
+                
+                dividend_list = []
+                with baostock_lock:
+                    while (rs_dividend.error_code == '0') & rs_dividend.next():
+                        row_data = rs_dividend.get_row_data()
+                        # 确保行数据长度与字段数匹配
+                        if len(row_data) == len(fields):
+                            dividend_list.append(row_data)
+                
+                if dividend_list:
+                    all_dividends.extend(dividend_list)
+        except Exception as e:
+            # 记录错误但继续处理其他年份
+            if 'list index' in str(e).lower():
+                logger.debug(f"No dividend data for {code} in {year} (list index error)")
+            else:
+                logger.warning(f"Error fetching dividend data for {code} in {year}: {type(e).__name__}: {e}", exc_info=True)
+            continue
     
-    if not all_dividends:
+    if not all_dividends or fields is None:
         return None
     
-    return pd.DataFrame(all_dividends, columns=fields)
+    try:
+        return pd.DataFrame(all_dividends, columns=fields)
+    except Exception as e:
+        logger.error(f"Error creating DataFrame for {code}: {e}", exc_info=True)
+        return None
 
 
 def identify_dividend_fields(dividend_df):
@@ -168,24 +227,88 @@ def fetch_stock_price(code, check_date):
         #     'close': 13.85
         # }
     """
-    start_date = (pd.to_datetime(check_date) - timedelta(days=7)).strftime('%Y-%m-%d')
-    end_date = (pd.to_datetime(check_date) + timedelta(days=7)).strftime('%Y-%m-%d')
+    ensure_baostock_login()  # 确保已登录
     
-    rs_price = bs.query_history_k_data_plus(
-        code, "date,close",
-        start_date=start_date,
-        end_date=end_date,
-        frequency="d", adjustflag="2"
-    )
-    
-    price_list = []
-    while (rs_price.error_code == '0') & rs_price.next():
-        price_list.append(rs_price.get_row_data())
+    try:
+        start_date = (pd.to_datetime(check_date) - timedelta(days=7)).strftime('%Y-%m-%d')
+        end_date = (pd.to_datetime(check_date) + timedelta(days=7)).strftime('%Y-%m-%d')
+        
+        logger.debug(f"Fetching price for {code} from {start_date} to {end_date}")
+        
+        # 尝试修复 baostock 的 IndexError 问题
+        try:
+            with baostock_lock:
+                rs_price = bs.query_history_k_data_plus(
+                    code, "date,close",
+                    start_date=start_date,
+                    end_date=end_date,
+                    frequency="d", adjustflag="2"
+                )
+        except IndexError as e:
+            logger.warning(f"BaoStock IndexError for {code}, trying without adjustflag")
+            # 尝试不使用 adjustflag 参数
+            try:
+                with baostock_lock:
+                    rs_price = bs.query_history_k_data_plus(
+                        code, "date,close",
+                        start_date=start_date,
+                        end_date=end_date,
+                        frequency="d"
+                    )
+            except Exception as e2:
+                logger.error(f"Failed to fetch price data for {code} even without adjustflag: {e2}")
+                return None
+        
+        if rs_price.error_code != '0':
+            logger.warning(f"Query failed for {code}: error_code={rs_price.error_code}, error_msg={rs_price.error_msg}")
+            return None
+        
+        price_list = []
+        row_count = 0
+        with baostock_lock:
+            while (rs_price.error_code == '0') & rs_price.next():
+                try:
+                    row_data = rs_price.get_row_data()
+                    row_count += 1
+                    if row_data and len(row_data) >= 2:
+                        price_list.append(row_data)
+                    else:
+                        logger.warning(f"Invalid row data for {code}: {row_data}")
+                except Exception as e:
+                    logger.error(f"Error processing row {row_count} for {code}: {e}")
+                    logger.error(f"Row data type: {type(row_data) if 'row_data' in locals() else 'undefined'}")
+                    if 'row_data' in locals():
+                        logger.error(f"Row data content: {row_data}")
+                    continue
+    except Exception as e:
+        logger.error(f"Error in fetch_stock_price for {code} on {check_date}", exc_info=True)
+        return None
     
     if not price_list:
         return None
     
-    price_df = pd.DataFrame(price_list, columns=rs_price.fields)
+    # Debug: Check data structure mismatch
+    expected_fields = rs_price.fields if isinstance(rs_price.fields, list) else rs_price.fields.split(',')
+    
+    if price_list and len(price_list[0]) != len(expected_fields):
+        logger.error(f"Column mismatch for {code} on {check_date}:")
+        logger.error(f"Expected columns: {expected_fields} (count: {len(expected_fields)})")
+        logger.error(f"Actual data columns: {len(price_list[0])} columns")
+        logger.error(f"First row data: {price_list[0]}")
+        logger.error(f"All row data (first 3 rows):")
+        for i, row in enumerate(price_list[:3]):
+            logger.error(f"  Row {i}: {row}")
+        
+        # 打印 rs_price 对象的所有属性
+        logger.error(f"rs_price attributes: {dir(rs_price)}")
+        if hasattr(rs_price, 'fields'):
+            logger.error(f"rs_price.fields type: {type(rs_price.fields)}")
+            logger.error(f"rs_price.fields content: {rs_price.fields}")
+        
+        # Try to use only the expected columns
+        price_list = [[row[i] for i in range(len(expected_fields))] for row in price_list]
+    
+    price_df = pd.DataFrame(price_list, columns=expected_fields)
     price_df['close'] = pd.to_numeric(price_df['close'], errors='coerce')
     
     # 找最接近的交易日
@@ -270,63 +393,96 @@ def calculate_static_dividend_yield(code, year, use_previous_day=True):
         # 使用除权除息日当天价格
         result = calculate_static_dividend_yield('sh.603565', 2024, use_previous_day=False)
     """
-    # 获取该年度的分红数据
-    dividend_df = fetch_dividend_data(code, [year])
-    if dividend_df is None:
-        return {'error': '无分红数据'}
-    
-    # 识别字段
-    date_field, cash_field = identify_dividend_fields(dividend_df)
-    if not date_field or not cash_field:
-        return {'error': '无法识别必要字段'}
-    
-    # 转换数据类型
-    dividend_df[date_field] = pd.to_datetime(dividend_df[date_field], errors='coerce')
-    dividend_df[cash_field] = pd.to_numeric(dividend_df[cash_field], errors='coerce')
-    
-    # 查找该年的除权除息日
-    ex_dividend_dates = find_ex_dividend_dates(dividend_df, date_field, year)
-    if not ex_dividend_dates:
-        return {'error': f'{year}年无除权除息记录'}
+    try:
+        # 获取该年度的分红数据
+        dividend_df = fetch_dividend_data(code, [year])
+        if dividend_df is None:
+            return {'error': '无分红数据'}
+        
+        # 识别字段
+        date_field, cash_field = identify_dividend_fields(dividend_df)
+        if not date_field or not cash_field:
+            return {'error': '无法识别必要字段'}
+        
+        # 转换数据类型
+        dividend_df[date_field] = pd.to_datetime(dividend_df[date_field], errors='coerce')
+        dividend_df[cash_field] = pd.to_numeric(dividend_df[cash_field], errors='coerce')
+        
+        # 查找该年的除权除息日
+        ex_dividend_dates = find_ex_dividend_dates(dividend_df, date_field, year)
+        if not ex_dividend_dates:
+            return {'error': f'{year}年无除权除息记录'}
+    except Exception as e:
+        logger.error(f"Error processing dividend data for {code} in {year}", exc_info=True)
+        return {'error': f'处理分红数据时出错: {str(e)}'}
     
     results = []
     
     for ex_date in ex_dividend_dates:
-        # 获取该次分红的金额
-        dividend_amount = dividend_df[dividend_df[date_field] == ex_date][cash_field].iloc[0]
-        
-        # 确定价格日期
-        price_date = ex_date - timedelta(days=1) if use_previous_day else ex_date
-        
-        # 获取股价
-        price_data = fetch_stock_price(code, price_date.strftime('%Y-%m-%d'))
-        
-        if price_data and price_data['close'] > 0:
-            # 计算该次分红的股息率
-            static_yield = (dividend_amount / price_data['close']) * 100
+        try:
+            # 获取该次分红的金额
+            dividend_rows = dividend_df[dividend_df[date_field] == ex_date]
+            if dividend_rows.empty:
+                continue
             
-            results.append({
-                'ex_dividend_date': ex_date,
-                'dividend_amount': dividend_amount,
-                'price_date': price_data['date'],
-                'stock_price': price_data['close'],
-                'static_yield': static_yield
-            })
+            # 检查是否为空
+            if len(dividend_rows) == 0:
+                logger.debug(f"No dividend rows found for {code} on {ex_date}")
+                continue
+                
+            try:
+                dividend_amount = dividend_rows[cash_field].iloc[0]
+            except IndexError:
+                logger.error(f"IndexError accessing dividend amount for {code} on {ex_date}")
+                logger.error(f"  - dividend_rows shape: {dividend_rows.shape}")
+                logger.error(f"  - cash_field: {cash_field}")
+                logger.error(f"  - dividend_rows columns: {dividend_rows.columns.tolist()}")
+                logger.error(f"  - dividend_rows content: {dividend_rows.head()}")
+                continue
+                
+            if pd.isna(dividend_amount) or dividend_amount <= 0:
+                continue
+            
+            # 确定价格日期
+            price_date = ex_date - timedelta(days=1) if use_previous_day else ex_date
+            
+            # 获取股价
+            price_data = fetch_stock_price(code, price_date.strftime('%Y-%m-%d'))
+            
+            if price_data and price_data.get('close', 0) > 0:
+                # 计算该次分红的股息率
+                static_yield = (dividend_amount / price_data['close']) * 100
+                
+                results.append({
+                    'ex_dividend_date': ex_date,
+                    'dividend_amount': dividend_amount,
+                    'price_date': price_data['date'],
+                    'stock_price': price_data['close'],
+                    'static_yield': static_yield
+                })
+        except Exception as e:
+            logger.error(f"Error processing dividend for {code} on {ex_date}: {type(e).__name__}: {e}")
+            logger.error(f"Details - Code: {code}, Ex-date: {ex_date}, Price date: {price_date.strftime('%Y-%m-%d') if 'price_date' in locals() else 'N/A'}")
+            continue
     
     # 计算年度总静态股息率
     if results:
-        total_dividend = sum(r['dividend_amount'] for r in results)
-        # 使用第一次除权除息前的股价作为基准
-        base_price = results[0]['stock_price']
-        annual_static_yield = (total_dividend / base_price) * 100
-        
-        return {
-            'year': year,
-            'dividends': results,
-            'total_dividend': total_dividend,
-            'annual_static_yield': annual_static_yield,
-            'base_price': base_price
-        }
+        try:
+            total_dividend = sum(r['dividend_amount'] for r in results)
+            # 使用第一次除权除息前的股价作为基准
+            base_price = results[0]['stock_price']
+            annual_static_yield = (total_dividend / base_price) * 100
+            
+            return {
+                'year': year,
+                'dividends': results,
+                'total_dividend': total_dividend,
+                'annual_static_yield': annual_static_yield,
+                'base_price': base_price
+            }
+        except Exception as e:
+            logger.error(f"Error calculating annual static yield for {code}", exc_info=True)
+            return {'error': f'计算年度静态股息率时出错: {str(e)}'}
     
     return {'error': '无法计算静态股息率'}
 
