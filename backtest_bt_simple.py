@@ -176,11 +176,18 @@ def analyze_results(results):
         # 打印第一个策略的所有统计信息以了解结构
         if len(summary_data) == 0:
             print(f"\n可用的统计指标: {list(stats.index)}")
-            
+        
+        # 计算实际交易时长
+        start_date = stats.loc['start']
+        end_date = stats.loc['end']
+        days = (end_date - start_date).days
+        years = days / 365.25
+        
         summary_data.append({
             '策略': name,
             '总收益率(%)': f"{stats.loc['total_return'] * 100:.2f}",
             '年化收益率(%)': f"{stats.loc['cagr'] * 100:.2f}",
+            '实际时长(天)': f"{days}",
             '夏普比率': f"{stats.loc['daily_sharpe']:.2f}" if 'daily_sharpe' in stats else 'N/A',
             '最大回撤(%)': f"{stats.loc['max_drawdown'] * 100:.2f}",
             '月度夏普': f"{stats.loc['monthly_sharpe']:.2f}" if 'monthly_sharpe' in stats else 'N/A'
