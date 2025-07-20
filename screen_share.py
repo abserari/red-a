@@ -31,16 +31,7 @@ client = MongoClient("mongodb://localhost:27017/")
 db = client["red_a"]
 
 # 多进程相关配置
-use_multiprocess = False  # 默认使用线程池，可以设置为True使用多进程
 shutdown_event = mp.Event()
-
-def signal_handler(signum, frame):
-    """处理中断信号"""
-    logger.info("收到中断信号，正在优雅关闭...")
-    shutdown_event.set()
-
-signal.signal(signal.SIGINT, signal_handler)
-signal.signal(signal.SIGTERM, signal_handler)
 
 def init_worker():
     """
@@ -245,10 +236,7 @@ def screen_stocks_multiprocess(date, num_processes=None, file_writer=None):
                         file_writer.put(result)
                 pbar.update(1)
                 
-                # 检查是否应该关闭
-                if shutdown_event.is_set():
-                    pool.terminate()
-                    break
+                # 不在这里检查shutdown_event，让进程自然完成
     
     return qualified_stocks
 
@@ -318,6 +306,17 @@ def save_results_to_csv(results, filename):
 
 # 主程序
 if __name__ == "__main__":
+    # 设置信号处理器（只在主程序中）
+    def signal_handler(signum, frame):
+        """处理中断信号"""
+        print("\n收到中断信号，正在优雅关闭...")
+        shutdown_event.set()
+        import sys
+        sys.exit(0)
+    
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     # 配置参数
     year = 2024
     batch_size = 5  # 减小批次大小避免API过载
@@ -364,13 +363,25 @@ if __name__ == "__main__":
             
             try:
                 all_results = []
-                for date in screen_dates:
-                    if shutdown_event.is_set():
+                for i, date in enumerate(screen_dates):
+                    try:
+                        print(f"\n处理第 {i+1}/{len(screen_dates)} 个日期: {date}")
+                        date_results = screen_stocks_multiprocess(date, file_writer=file_writer)
+                        all_results.extend(date_results)
+                        print(f"日期 {date} 找到 {len(date_results)} 只符合条件的股票")
+                        print(f"累计找到 {len(all_results)} 只股票")
+                    except KeyboardInterrupt:
+                        print(f"\n用户中断，停止处理剩余日期")
                         break
-                    date_results = screen_stocks_multiprocess(date, file_writer=file_writer)
-                    all_results.extend(date_results)
-                    print(f"日期 {date} 找到 {len(date_results)} 只符合条件的股票")
+                    except Exception as e:
+                        print(f"\n处理日期 {date} 时出错: {type(e).__name__}: {e}")
+                        logger.error(f"处理日期 {date} 时出错", exc_info=True)
+                        # 继续处理下一个日期，而不是break
+                        continue
+                
+                print(f"\n完成所有 {len(screen_dates)} 个日期的处理")
             finally:
+                print("\n停止文件写入器...")
                 file_writer.stop()
                 
             results = all_results

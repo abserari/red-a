@@ -37,12 +37,15 @@ class SafeFileWriter:
         # 关闭事件
         self.shutdown_event = mp.Event()
         
+        # 是否打印统计信息的标志
+        self.print_stats = True
+        
     def start(self):
         """启动写入进程"""
         self.writer_process = mp.Process(
             target=self._writer_worker,
             args=(self.result_queue, self.filename, self.temp_filename, 
-                  self.save_interval, self.batch_size, self.shutdown_event)
+                  self.save_interval, self.batch_size, self.shutdown_event, self.print_stats)
         )
         self.writer_process.start()
         logger.info(f"文件写入进程已启动，PID: {self.writer_process.pid}")
@@ -71,7 +74,7 @@ class SafeFileWriter:
         self.shutdown_event.set()
         
     @staticmethod
-    def _writer_worker(result_queue, filename, temp_filename, save_interval, batch_size, shutdown_event):
+    def _writer_worker(result_queue, filename, temp_filename, save_interval, batch_size, shutdown_event, print_stats=True):
         """
         写入进程的工作函数
         """
@@ -106,11 +109,12 @@ class SafeFileWriter:
                     )
                     
                     if should_save:
-                        # 保存到临时文件
+                        # 保存到临时文件（追加模式，保留所有数据）
                         df = pd.DataFrame(results)
                         df.to_csv(temp_filename, index=False, encoding='utf-8-sig')
-                        logger.debug(f"已保存 {len(results)} 条结果到临时文件")
+                        logger.info(f"已保存 {len(results)} 条结果到临时文件")
                         last_save_time = current_time
+                        # 不清空results，继续累积所有数据
                         
                 except queue.Empty:
                     # 检查是否应该关闭
@@ -133,8 +137,9 @@ class SafeFileWriter:
                 if os.path.exists(temp_filename):
                     os.remove(temp_filename)
                     
-                # 返回统计信息
-                SafeFileWriter._print_statistics(df)
+                # 只在最终时打印统计信息
+                if print_stats:
+                    SafeFileWriter._print_statistics(df)
             else:
                 logger.warning("没有数据需要保存")
                 
