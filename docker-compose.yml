@@ -4,7 +4,7 @@ services:
   mongodb:
     image: mongo:7.0
     container_name: red-a-mongodb
-    restart: always
+    restart: unless-stopped
     ports:
       - "27017:27017"
     environment:
@@ -19,7 +19,7 @@ services:
   mongo-express:
     image: mongo-express:latest
     container_name: red-a-mongo-express
-    restart: always
+    restart: unless-stopped
     ports:
       - "8081:8081"
     environment:
