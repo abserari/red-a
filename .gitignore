@@ -8,3 +8,14 @@ wheels/
 
 # Virtual environments
 .venv
+.envrc
+
+# IDE settings
+.vscode/
+.idea/
+
+# Log files
+*.log
+
+# Data files
+*.csv
