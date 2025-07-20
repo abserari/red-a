@@ -24,20 +24,20 @@ def main():
     print("\n2. 获取示例股票数据...")
     sample_stocks = ['000001', '000002', '600000', '600036', '000858']  # 示例股票
     
-    # 获取历史价格
-    print("   获取历史价格数据...")
-    history_data = da.get_batch_stock_history(
+    # 获取历史价格（使用并发）
+    print("   获取历史价格数据（并发）...")
+    history_data = da.get_batch_stock_history_concurrent(
         stock_codes=sample_stocks,
         start_date=start_date,
         end_date=end_date,
-        check_existing=True  # 自动跳过已有数据
+        max_workers=5  # 示例股票较少，使用较小的并发数
     )
     
-    # 获取分红数据
-    print("   获取分红数据...")
-    dividend_data = da.get_batch_dividend_history(
+    # 获取分红数据（使用并发）
+    print("   获取分红数据（并发）...")
+    dividend_data = da.get_batch_dividend_history_concurrent(
         stock_codes=sample_stocks,
-        check_existing=True  # 自动跳过新鲜数据
+        max_workers=5  # 示例股票较少，使用较小的并发数
     )
     
     # 3. 查看数据统计

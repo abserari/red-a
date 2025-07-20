@@ -6,7 +6,7 @@
 
 import time
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Union, Any
+from typing import Dict, List, Optional, Union, Any, Tuple
 from enum import Enum
 
 import akshare as ak
@@ -235,7 +235,7 @@ class DataAcquisition:
         pd.DataFrame
             历史行情数据
         """
-        # 先从数据库查询
+        # 先检查数据库中是否有足够的数据
         query = {
             "stock_code": stock_code,
             "date": {
@@ -244,22 +244,37 @@ class DataAcquisition:
             }
         }
         
-        cursor = self.daily_prices.find(query).sort("date", ASCENDING)
-        existing_data = list(cursor)
+        # 使用count_documents更高效地检查数据量
+        expected_start = datetime.strptime(start_date, '%Y%m%d')
+        expected_end = datetime.strptime(end_date, '%Y%m%d')
+        expected_days = (expected_end - expected_start).days
         
-        if existing_data:
-            df = pd.DataFrame(existing_data)
-            df['date'] = pd.to_datetime(df['date'])
-            
-            # 检查数据完整性
-            expected_start = datetime.strptime(start_date, '%Y%m%d')
-            expected_end = datetime.strptime(end_date, '%Y%m%d')
-            actual_start = df['date'].min()
-            actual_end = df['date'].max()
-            
-            # 如果数据完整，直接返回
-            if actual_start <= expected_start and actual_end >= expected_end:
-                print(f"从数据库获取 {stock_code} 历史数据")
+        # 获取现有数据的日期范围
+        pipeline = [
+            {"$match": query},
+            {"$group": {
+                "_id": None,
+                "count": {"$sum": 1},
+                "min_date": {"$min": "$date"},
+                "max_date": {"$max": "$date"}
+            }}
+        ]
+        
+        agg_result = list(self.daily_prices.aggregate(pipeline))
+        
+        if agg_result and agg_result[0]['count'] > 0:
+            result = agg_result[0]
+            # 如果数据范围完整（考虑非交易日，只要有50%以上的数据就认为完整）
+            if (result['min_date'] <= expected_start and 
+                result['max_date'] >= expected_end and 
+                result['count'] >= expected_days * 0.5):
+                
+                # 从数据库获取数据
+                cursor = self.daily_prices.find(query).sort("date", ASCENDING)
+                df = pd.DataFrame(list(cursor))
+                df['date'] = pd.to_datetime(df['date'])
+                
+                print(f"  {stock_code}: 数据已存在（{result['count']}条），从数据库返回")
                 return df[['date', 'open', 'close', 'high', 'low', 'volume', 'amount', 'pct_change']]
         
         # 需要从API获取数据
@@ -311,21 +326,33 @@ class DataAcquisition:
                     }
                     records.append(record)
                 
-                # 批量插入，忽略重复
+                # 批量插入新数据
                 if records:
-                    try:
-                        self.daily_prices.insert_many(records, ordered=False)
-                    except DuplicateKeyError:
-                        # 更新已存在的记录
-                        for record in records:
-                            self.daily_prices.update_one(
-                                {
-                                    "stock_code": record["stock_code"],
-                                    "date": record["date"]
-                                },
-                                {"$set": record},
-                                upsert=True
-                            )
+                    # 先检查哪些数据已经存在
+                    dates_to_check = [r['date'] for r in records]
+                    existing_cursor = self.daily_prices.find({
+                        "stock_code": stock_code,
+                        "date": {"$in": dates_to_check}
+                    }, {"date": 1})
+                    existing_dates = {doc['date'] for doc in existing_cursor}
+                    
+                    # 只插入不存在的数据
+                    new_records = [r for r in records if r['date'] not in existing_dates]
+                    
+                    if new_records:
+                        try:
+                            self.daily_prices.insert_many(new_records, ordered=False)
+                            print(f"  插入 {len(new_records)} 条新数据（共获取 {len(records)} 条）")
+                        except Exception as e:
+                            print(f"  批量插入出错: {e}")
+                            # 如果批量插入失败，逐条插入
+                            for record in new_records:
+                                try:
+                                    self.daily_prices.insert_one(record)
+                                except:
+                                    pass
+                    else:
+                        print(f"  所有 {len(records)} 条数据已存在，跳过插入")
                 
                 return df
                 
@@ -406,6 +433,141 @@ class DataAcquisition:
         except Exception as e:
             print(f"获取 {stock_code} 分红数据失败: {e}")
             return pd.DataFrame()
+    
+    def get_missing_date_ranges(self, stock_code: str, start_date: str, end_date: str) -> List[Tuple[str, str]]:
+        """
+        获取缺失的日期范围
+        
+        Parameters:
+        -----------
+        stock_code : str
+            股票代码
+        start_date : str
+            开始日期 'YYYYMMDD'
+        end_date : str
+            结束日期 'YYYYMMDD'
+        
+        Returns:
+        --------
+        List[Tuple[str, str]]: 缺失的日期范围列表，每个元组包含(开始日期, 结束日期)
+        """
+        # 查询已有数据的日期
+        pipeline = [
+            {
+                "$match": {
+                    "stock_code": stock_code,
+                    "date": {
+                        "$gte": datetime.strptime(start_date, '%Y%m%d'),
+                        "$lte": datetime.strptime(end_date, '%Y%m%d')
+                    }
+                }
+            },
+            {
+                "$group": {
+                    "_id": None,
+                    "dates": {"$push": "$date"},
+                    "count": {"$sum": 1},
+                    "min_date": {"$min": "$date"},
+                    "max_date": {"$max": "$date"}
+                }
+            }
+        ]
+        
+        result = list(self.daily_prices.aggregate(pipeline))
+        
+        if not result or result[0]['count'] == 0:
+            # 完全没有数据，返回整个范围
+            return [(start_date, end_date)]
+        
+        # 获取已有日期并排序
+        existing_dates = sorted(result[0]['dates'])
+        
+        # 转换日期格式
+        start_dt = datetime.strptime(start_date, '%Y%m%d')
+        end_dt = datetime.strptime(end_date, '%Y%m%d')
+        
+        # 检查数据完整性（简化版：只检查起止范围）
+        min_date = result[0]['min_date']
+        max_date = result[0]['max_date']
+        
+        missing_ranges = []
+        
+        # 检查开始日期前是否有缺失
+        if min_date > start_dt:
+            missing_ranges.append((start_date, (min_date - timedelta(days=1)).strftime('%Y%m%d')))
+        
+        # 检查结束日期后是否有缺失
+        if max_date < end_dt:
+            missing_ranges.append(((max_date + timedelta(days=1)).strftime('%Y%m%d'), end_date))
+        
+        # 对于更精确的缺失检测，可以检查中间的断点
+        # 但考虑到股市有非交易日，这里简化处理
+        
+        return missing_ranges
+    
+    def get_stock_history_smart(self, stock_code: str, start_date: str, end_date: str, 
+                               adjust: str = "qfq", task_id: Optional[str] = None) -> pd.DataFrame:
+        """
+        智能获取股票历史行情数据（只获取缺失的部分）
+        
+        Parameters:
+        -----------
+        stock_code : str
+            股票代码
+        start_date : str
+            开始日期 'YYYYMMDD'
+        end_date : str
+            结束日期 'YYYYMMDD'
+        adjust : str
+            复权类型
+        task_id : str, optional
+            任务ID
+        
+        Returns:
+        --------
+        pd.DataFrame
+            历史行情数据
+        """
+        # 先检查缺失的日期范围
+        missing_ranges = self.get_missing_date_ranges(stock_code, start_date, end_date)
+        
+        if not missing_ranges:
+            # 数据已完整，直接从数据库返回
+            print(f"  {stock_code}: 数据已完整，从数据库返回")
+            query = {
+                "stock_code": stock_code,
+                "date": {
+                    "$gte": datetime.strptime(start_date, '%Y%m%d'),
+                    "$lte": datetime.strptime(end_date, '%Y%m%d')
+                }
+            }
+            cursor = self.daily_prices.find(query).sort("date", ASCENDING)
+            df = pd.DataFrame(list(cursor))
+            if not df.empty:
+                df['date'] = pd.to_datetime(df['date'])
+                return df[['date', 'open', 'close', 'high', 'low', 'volume', 'amount', 'pct_change']]
+            return pd.DataFrame()
+        
+        # 获取缺失的数据
+        print(f"  {stock_code}: 检测到 {len(missing_ranges)} 段缺失数据")
+        for range_start, range_end in missing_ranges:
+            print(f"    获取缺失段: {range_start} - {range_end}")
+            self.get_stock_history(stock_code, range_start, range_end, adjust, task_id)
+        
+        # 返回完整数据
+        query = {
+            "stock_code": stock_code,
+            "date": {
+                "$gte": datetime.strptime(start_date, '%Y%m%d'),
+                "$lte": datetime.strptime(end_date, '%Y%m%d')
+            }
+        }
+        cursor = self.daily_prices.find(query).sort("date", ASCENDING)
+        df = pd.DataFrame(list(cursor))
+        if not df.empty:
+            df['date'] = pd.to_datetime(df['date'])
+            return df[['date', 'open', 'close', 'high', 'low', 'volume', 'amount', 'pct_change']]
+        return pd.DataFrame()
     
     def scan_missing_history_data(self, stock_codes: List[str], start_date: str, 
                                  end_date: str, min_days: int = 100) -> List[str]:
