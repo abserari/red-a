@@ -39,7 +39,7 @@ def main():
         if args.mode == 'screen' or args.mode == 'full':
             # 执行筛选
             logger.info("开始执行股票筛选...")
-            screener = DividendScreener()
+            screener = DividendScreener(excel_file=args.excel)
             results = screener.screen_stocks(
                 years=args.years,
                 min_yield=args.min_yield

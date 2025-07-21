@@ -32,8 +32,8 @@ class DividendBacktest:
         self.csv_file = csv_file
         self.data_source = BaoStockDataSource()
         
-        # 加载筛选结果
-        self.screening_results = pd.read_csv(csv_file)
+        # 加载筛选结果，确保股票代码作为字符串读取
+        self.screening_results = pd.read_csv(csv_file, dtype={'code': str})
         logger.info(f"加载了 {len(self.screening_results)} 条筛选结果")
         
         # 存储回测结果

@@ -9,7 +9,7 @@ from typing import List, Dict, Optional
 from tqdm import tqdm
 
 from data_source import BaoStockDataSource
-from dividend import get_comprehensive_dividend_yield
+from dividend import calculate_comprehensive_dividend_yield
 
 logger = logging.getLogger(__name__)
 
@@ -17,27 +17,41 @@ logger = logging.getLogger(__name__)
 class DividendScreener:
     """红利股票筛选器"""
     
-    def __init__(self, stock_codes: Optional[List[str]] = None):
+    def __init__(self, stock_codes: Optional[List[str]] = None, excel_file: Optional[str] = None):
         """
         初始化筛选器
         
         Args:
             stock_codes: 要筛选的股票代码列表，如果为None则从文件读取
+            excel_file: Excel文件路径，如果为None则使用默认文件
         """
+        self.excel_file = excel_file or '分红2025.xlsx'
         self.stock_codes = stock_codes or self._load_stock_codes()
         self.data_source = BaoStockDataSource()
         self.results = []
         
     def _load_stock_codes(self) -> List[str]:
-        """从Excel文件加载股票代码"""
+        """从Excel文件或share_pool加载股票代码"""
+        # 如果指定了use_share_pool，从share_pool.py导入
+        if self.excel_file == 'share_pool':
+            try:
+                from share_pool import share_list
+                # 转换代码格式：去掉.SH/.SZ后缀
+                codes = [code.split('.')[0] for code in share_list]
+                logger.info(f"从share_pool.py加载了 {len(codes)} 个股票代码")
+                return codes
+            except ImportError:
+                logger.warning("无法导入share_pool.py")
+                return self._get_default_stock_pool()
+        
         try:
             # 尝试从Excel文件读取
-            df = pd.read_excel('分红2025.xlsx')
+            df = pd.read_excel(self.excel_file)
             codes = df.iloc[:, 0].astype(str).tolist()
-            logger.info(f"从Excel文件加载了 {len(codes)} 个股票代码")
+            logger.info(f"从Excel文件 {self.excel_file} 加载了 {len(codes)} 个股票代码")
             return codes
         except Exception as e:
-            logger.warning(f"无法读取Excel文件: {e}")
+            logger.warning(f"无法读取Excel文件 {self.excel_file}: {e}")
             # 使用默认股票池
             return self._get_default_stock_pool()
             
@@ -64,7 +78,8 @@ class DividendScreener:
             筛选结果DataFrame
         """
         if screening_date is None:
-            screening_date = datetime.now()
+            # 使用2024年作为筛选基准日期，确保有历史数据
+            screening_date = datetime(2024, 7, 21)
             
         logger.info(f"开始筛选，共 {len(self.stock_codes)} 只股票")
         logger.info(f"筛选条件: 连续{years}年分红率 >= {min_yield}%")
@@ -93,17 +108,21 @@ class DividendScreener:
     def _screen_single_stock(self, code: str, years: int, 
                            min_yield: float, screening_date: datetime) -> Optional[Dict]:
         """筛选单只股票"""
-        # 获取综合分红率数据
-        yield_data = get_comprehensive_dividend_yield(
-            code, 
-            end_year=screening_date.year, 
-            num_years=years
-        )
+        # 需要计算多年的分红率
+        yearly_yields = {}
+        current_year = screening_date.year
         
-        if not yield_data or 'yearly_yields' not in yield_data:
-            return None
+        # 获取过去N年的分红率
+        for i in range(years):
+            year = current_year - i
+            from dividend import calculate_static_dividend_yield
             
-        yearly_yields = yield_data['yearly_yields']
+            # 转换股票代码格式
+            bs_code = self.data_source.convert_stock_code(code)
+            year_result = calculate_static_dividend_yield(bs_code, year)
+            if 'error' not in year_result and year_result.get('annual_static_yield'):
+                yearly_yields[str(year)] = year_result['annual_static_yield']
+        
         if not yearly_yields:
             return None
             
@@ -111,7 +130,7 @@ class DividendScreener:
         valid_years = []
         yields = []
         
-        for year_str, year_yield in yearly_yields.items():
+        for year_str, year_yield in sorted(yearly_yields.items(), reverse=True):
             if year_yield >= min_yield:
                 valid_years.append(year_str)
                 yields.append(year_yield)
@@ -120,18 +139,31 @@ class DividendScreener:
         if len(valid_years) < years:
             return None
             
+        # 获取当前的综合分红率数据
+        yield_data = calculate_comprehensive_dividend_yield(bs_code, screening_date)
+        
         # 计算最近4年的平均分红率
-        recent_yields = list(yearly_yields.values())[:4]
+        recent_yields = list(yields)[:4]
         four_year_avg = np.mean(recent_yields) if len(recent_yields) >= 4 else 0
         
         # 计算标准差
         std_dev = np.std(yields) if len(yields) > 1 else 0
         
+        # 提取动态和静态收益率
+        dynamic_yield = 0
+        static_yield = 0
+        
+        if yield_data:
+            if yield_data.get('dynamic_yield') and yield_data['dynamic_yield'].get('yield_percentage'):
+                dynamic_yield = yield_data['dynamic_yield']['yield_percentage']
+            if yield_data.get('static_yield') and yield_data['static_yield'].get('yield_percentage'):
+                static_yield = yield_data['static_yield']['yield_percentage']
+        
         return {
             'code': code,
             'screening_date': screening_date.strftime('%Y-%m-%d'),
-            'dynamic_yield': yield_data.get('dynamic_yield', 0),
-            'static_yield': yield_data.get('static_yield', 0),
+            'dynamic_yield': dynamic_yield,
+            'static_yield': static_yield,
             'qualified_years': len(valid_years),
             'avg_yield': np.mean(yields),
             'min_yield': min(yields),
