@@ -3,7 +3,7 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## Project Overview
-Red-A (红A) is a dividend arbitrage strategy analysis system for Chinese A-shares. It focuses on identifying high-dividend stocks and optimizing buy/sell timing around ex-dividend dates.
+Red-A (红A) is a dividend arbitrage strategy analysis system for Chinese A-shares. It focuses on identifying high-dividend stocks and optimizing buy/sell timing around ex-dividend dates. The system uses BaoStock as the primary data source and requires no database infrastructure.
 
 ## Key Commands
 
@@ -15,128 +15,93 @@ source .venv/bin/activate  # Linux/Mac
 # or
 .venv\Scripts\activate     # Windows
 uv pip sync pyproject.toml
-
-# Start MongoDB (required for data storage)
-docker-compose up -d
 ```
 
-### Data Acquisition
+### Main Workflow
 ```bash
-# Quick test with sample stocks (8 years data)
-uv run get_data.py
+# Run complete workflow (screening + backtest)
+uv run main.py
 
-# Sequential data acquisition with smart caching (RECOMMENDED)
-# Default: 8 years of data, 0.5s delay between stocks
-uv run get_data_sequential.py
+# Screen only
+uv run main.py --mode screen --years 5 --min-yield 6.0
 
-# Force update all data (ignore cache)
-uv run get_data_sequential.py --force
+# Backtest only (uses latest screening results)
+uv run main.py --mode backtest
 
-# Test mode (only first 20 stocks)
-uv run get_data_sequential.py --test
-
-# Custom parameters examples
-uv run get_data_sequential.py --years 10  # 10 years of data
-uv run get_data_sequential.py --delay 1.0  # 1 second delay
-uv run get_data_sequential.py --dividend-days 7  # Update dividends weekly
-
-# Single stock data acquisition example
-uv run data_acquisition.py
+# Backtest with specific file
+uv run main.py --mode backtest --csv dividend_screening_results_20240101_120000.csv
 ```
 
-### Analysis
-```bash
-# Launch Jupyter for strategy analysis
-jupyter lab
-# Open dividend_strategy_analysis.ipynb
-
-# Run backtest with MongoDB data (requires MongoDB running)
-uv run backtest_simple.py
-
-# Run backtest directly from BaoStock (no MongoDB required)
-uv run backtest_simple_baostock.py
-```
-
-### Testing
-```bash
-# Run tests (when implemented)
-uv run tests/
-```
 
 ## Architecture Overview
 
 ### Data Flow
-1. **Data Sources** → `data_acquisition.py` or `tushare_data_acquisition.py`
-2. **Storage** → MongoDB (stocks, daily_prices, dividends collections)
-3. **Analysis** → `dividend_strategy.py` functions
-4. **Visualization** → Jupyter notebooks
+1. **BaoStock API** → `data_source.py` (unified data interface)
+2. **Analysis** → `dividend.py` (yield calculations) + `screener.py` (stock filtering)
+3. **Backtest** → `backtest.py` (strategy validation)
+4. **Output** → CSV files and PNG charts
 
 ### Core Modules
 
-- **data_acquisition.py**: Primary data fetcher with multiple data sources
-  - Supports AkShare, BaoStock, and Tushare APIs
-  - `get_stock_list()`: Fetches all A-share stock codes
-  - `get_stock_history_smart()`: Intelligently fetches only missing data
-  - `get_dividend_history()`: Retrieves dividend announcements with caching
-  - MongoDB integration with automatic indexing and upsert logic
+- **data_source.py**: BaoStock data source wrapper
+  - Unified API for all data fetching operations
+  - Automatic login/logout management
+  - Built-in caching to reduce API calls
+  - Stock code format conversion
+  - Forward adjustment calculations
 
-- **get_data_sequential.py**: Sequential data acquisition (stable & recommended)
-  - Processes stocks one by one with configurable delay
-  - Smart caching: skips stocks with complete data
-  - Detailed progress tracking and ETA estimation
-  - Robust error handling without complexity
+- **dividend.py**: Dividend yield calculation module
+  - Dynamic yield (past 12 months)
+  - Static yield (specific year)
+  - Comprehensive yield analysis
+  - Thread-safe BaoStock operations
 
-- **dividend_strategy.py**: Strategy analysis functions
-  - Calculate dividend yields
-  - Find optimal entry/exit points
-  - Backtest performance metrics
+- **screener.py**: Stock screening engine
+  - Filter stocks by dividend criteria
+  - Support for Excel file input
+  - Calculate multi-year average yields
+  - Generate screening reports
 
-- **backtest_simple.py**: Simplified backtesting using MongoDB data
-  - Tests multiple entry timing strategies
-  - Calculates actual returns based on historical prices
-  - Generates comprehensive performance reports
+- **backtest.py**: Backtesting engine
+  - Test multiple entry timing strategies
+  - Calculate returns with actual prices
+  - Generate performance visualizations
+  - Detailed trade-by-trade analysis
 
-- **backtest_simple_baostock.py**: Direct backtesting from BaoStock API
-  - No MongoDB dependency - fetches all data from BaoStock
-  - Same functionality as backtest_simple.py
-  - Includes data caching to minimize API calls
-  - Useful for testing without setting up MongoDB
-
-### Database Schema
-MongoDB collections:
-- `stocks`: Stock metadata (code, name)
-- `daily_prices`: Historical OHLCV data with forward adjustment
-- `dividends`: Dividend announcement records
-- `tasks`: Data acquisition task tracking
+- **main.py**: Main entry point
+  - Orchestrates screening and backtesting
+  - Command-line interface
+  - Automatic file management
 
 ### Strategy Implementation
 The core strategy screens for:
 - Stocks with >6% dividend yield for 5+ consecutive years
 - Optimal entry: 7 days before ex-dividend date
-- Exit: On or before ex-dividend date
+- Exit: Maximum price within 3 trading days before ex-dividend date
 - Target return: ~9.77% based on backtesting
 
-**Note**: Default data acquisition fetches 8 years of historical data to ensure:
-- Sufficient data for identifying 5+ years of consecutive high dividends
-- Extra years for backtesting and validation
-- Buffer for stocks that may have missing data in certain periods
+### Output Files
+The system generates:
+- `dividend_screening_results_*.csv`: Stocks meeting criteria
+- `dividend_backtest_results_*.csv`: Detailed trade records
+- `dividend_backtest_summary_*.csv`: Strategy performance summary
+- `dividend_backtest_results_*.png`: Visualization charts
 
 ## Development Notes
 
-### Adding New Data Sources
-Extend `data_acquisition.py` pattern - implement functions for:
-1. Data fetching with retry logic
-2. MongoDB storage with proper indexes
-3. Progress tracking for batch operations
+### Project Structure Principles
+- Single responsibility per file
+- Clear module boundaries
+- No database dependencies
+- Direct API data access
 
-### Extending Strategy Analysis
-Add new analysis functions to `dividend_strategy.py`:
-- Follow existing patterns for date handling
-- Include comprehensive docstrings
-- Return pandas DataFrames for easy integration
+### Adding New Features
+1. Extend `data_source.py` for new data types
+2. Add analysis functions to appropriate modules
+3. Update `main.py` to integrate new features
 
-### Data Update Patterns
-The system uses intelligent incremental updates:
-- Check existing data before fetching
-- Only request missing date ranges
-- Update task tracking for resumable operations
+### Code Style
+- Follow PEP 8 conventions
+- Add type hints where appropriate
+- Write comprehensive docstrings
+- Use context managers for resource management

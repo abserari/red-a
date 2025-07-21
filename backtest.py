@@ -1,16 +1,16 @@
 """
-简化版红利套利策略回测
-直接计算收益率分布，不依赖bt框架
+简化版红利套利策略回测 - 直接从BaoStock获取数据
+不依赖MongoDB，所有数据实时从BaoStock获取
 """
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from pymongo import MongoClient
 import logging
 import matplotlib.pyplot as plt
 import seaborn as sns
 from tqdm import tqdm
 from collections import defaultdict
+from data_source import BaoStockDataSource
 
 # 设置日志
 logging.basicConfig(level=logging.INFO)
@@ -27,11 +27,10 @@ plt.rcParams['axes.unicode_minus'] = False
 class DividendBacktest:
     """红利套利策略回测"""
     
-    def __init__(self, csv_file, mongo_uri="mongodb://admin:red-a-2025@localhost:27017/"):
+    def __init__(self, csv_file):
         """初始化"""
         self.csv_file = csv_file
-        self.client = MongoClient(mongo_uri)
-        self.db = self.client["stock_data"]
+        self.data_source = BaoStockDataSource()
         
         # 加载筛选结果
         self.screening_results = pd.read_csv(csv_file)
@@ -40,78 +39,108 @@ class DividendBacktest:
         # 存储回测结果
         self.backtest_results = []
         
+    def __enter__(self):
+        """上下文管理器入口"""
+        self.data_source.login()
+        return self
+        
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """上下文管理器出口"""
+        self.data_source.logout()
+    
+    
+    def get_stock_price_data(self, code, start_date, end_date):
+        """获取股票价格数据"""
+        return self.data_source.get_stock_history(code, start_date, end_date)
+        
     def get_trading_day_price(self, code, target_date, direction='forward'):
-        """获取最近交易日的价格
-        direction: 'forward'向后找, 'backward'向前找
-        """
+        """获取最近交易日的价格"""
         if isinstance(target_date, str):
             target_date = pd.to_datetime(target_date)
-            
-        # 转换股票代码格式：从 600036.SH 到 600036
-        stock_code = code.split('.')[0] if '.' in code else code
-            
-        # 查询最近的交易日数据
+        
+        # 扩大查询范围
         if direction == 'forward':
-            # 查找target_date当天或之后的第一个交易日
-            price_doc = self.db.daily_prices.find_one(
-                {'stock_code': stock_code, 'date': {'$gte': target_date}},
-                sort=[('date', 1)]
-            )
+            start_date = target_date
+            end_date = target_date + timedelta(days=10)
         else:
-            # 查找target_date当天或之前的第一个交易日
-            price_doc = self.db.daily_prices.find_one(
-                {'stock_code': stock_code, 'date': {'$lte': target_date}},
-                sort=[('date', -1)]
-            )
-            
-        if price_doc:
-            return float(price_doc['close']), pd.to_datetime(price_doc['date'])
-        return None, None
+            start_date = target_date - timedelta(days=10)
+            end_date = target_date
+        
+        return self.data_source.get_trading_day_price(code, target_date, direction)
         
     def get_max_price_before_exdate(self, code, ex_date, days=3):
         """获取除权日前N个交易日内的最高价"""
         if isinstance(ex_date, str):
             ex_date = pd.to_datetime(ex_date)
-            
-        # 转换股票代码格式
-        stock_code = code.split('.')[0] if '.' in code else code
-            
+        
         # 查询除权日前的交易数据
-        end_date = ex_date
-        start_date = ex_date - timedelta(days=days+5)  # 多查几天确保覆盖N个交易日
+        end_date = ex_date - timedelta(days=1)
+        start_date = ex_date - timedelta(days=days+10)  # 多查几天确保覆盖N个交易日
         
-        prices = list(self.db.daily_prices.find({
-            'stock_code': stock_code,
-            'date': {'$gte': start_date, '$lt': end_date}
-        }).sort('date', -1).limit(days))
+        # 获取价格数据
+        df = self.get_stock_price_data(code, start_date, end_date)
+        if df is None or df.empty:
+            return None, None
         
-        if prices:
-            # 获取最高价
-            max_price = max(float(p['high']) for p in prices)
-            # 获取最高价出现的日期
-            for p in prices:
-                if float(p['high']) == max_price:
-                    max_price_date = pd.to_datetime(p['date'])
-                    break
-            return max_price, max_price_date
-        return None, None
+        # 获取除权日前的交易日
+        valid_dates = df.index[df.index < ex_date]
+        if len(valid_dates) < 1:
+            return None, None
+        
+        # 取最近的N个交易日
+        recent_dates = valid_dates[-days:]
+        recent_data = df.loc[recent_dates]
+        
+        if recent_data.empty:
+            return None, None
+        
+        # 获取最高价
+        max_price = recent_data['high_adj'].max()
+        # 获取最高价出现的日期
+        max_price_date = recent_data[recent_data['high_adj'] == max_price].index[0]
+        
+        return float(max_price), max_price_date
+        
+    def get_dividend_data(self, code, year):
+        """获取分红数据"""
+        return self.data_source.get_dividend_data(code, year)
         
     def get_next_exdividend_date(self, code, after_date):
         """获取下一个除权除息日"""
         if isinstance(after_date, str):
             after_date = pd.to_datetime(after_date)
-            
-        # 转换股票代码格式
-        stock_code = code.split('.')[0] if '.' in code else code
-            
-        dividend = self.db.dividends.find_one({
-            'stock_code': stock_code,
-            'ex_date': {'$gt': after_date}
-        }, sort=[('ex_date', 1)])
         
-        if dividend and dividend.get('ex_date'):
-            return pd.to_datetime(dividend['ex_date'])
-        return None
+        # 查询多年的分红数据
+        start_year = after_date.year
+        end_year = min(after_date.year + 2, datetime.now().year)
+        
+        all_dividends = []
+        for year in range(start_year, end_year + 1):
+            div_df = self.get_dividend_data(code, year)
+            if not div_df.empty:
+                all_dividends.append(div_df)
+        
+        if not all_dividends:
+            return None
+        
+        # 合并所有分红数据
+        combined_df = pd.concat(all_dividends, ignore_index=True)
+        
+        # 筛选除权日
+        if 'dividRegistDate' not in combined_df.columns:
+            return None
+        
+        # 过滤有效的除权日
+        valid_divs = combined_df[
+            (combined_df['dividRegistDate'].notna()) & 
+            (combined_df['dividRegistDate'] > after_date)
+        ].sort_values('dividRegistDate')
+        
+        if valid_divs.empty:
+            return None
+        
+        # 返回最近的除权日
+        return valid_divs.iloc[0]['dividRegistDate']
         
     def calculate_single_trade(self, code, screening_date, buy_timing, days_before_ex):
         """计算单次交易的收益"""
@@ -390,16 +419,6 @@ class DividendBacktest:
 if __name__ == "__main__":
     import sys
     
-    # 检查MongoDB连接
-    try:
-        client = MongoClient("mongodb://admin:red-a-2025@localhost:27017/", serverSelectionTimeoutMS=5000)
-        client.server_info()
-    except Exception as e:
-        print(f"MongoDB连接失败: {e}")
-        print("请先启动MongoDB:")
-        print("docker compose up -d")
-        sys.exit(1)
-    
     # 获取CSV文件
     if len(sys.argv) > 1:
         csv_file = sys.argv[1]
@@ -414,29 +433,32 @@ if __name__ == "__main__":
             
     print(f"使用筛选结果文件: {csv_file}")
     
-    # 创建回测器
-    backtester = DividendBacktest(csv_file)
-    
-    # 运行回测
-    results_df = backtester.run_backtest()
-    
-    if not results_df.empty:
-        # 分析结果
-        timing_stats = backtester.analyze_results()
+    # 使用上下文管理器运行回测
+    with DividendBacktest(csv_file) as backtester:
+        try:
+        # 运行回测
+        results_df = backtester.run_backtest()
         
-        # 保存详细结果
-        output_file = csv_file.replace('screening_results', 'backtest_results')
-        results_df.to_csv(output_file, index=False, encoding='utf-8-sig')
-        print(f"\n详细回测结果已保存到: {output_file}")
-        
-        # 保存统计摘要
-        if timing_stats is not None:
-            summary_file = csv_file.replace('screening_results', 'backtest_summary')
-            timing_stats.to_csv(summary_file, encoding='utf-8-sig')
-            print(f"统计摘要已保存到: {summary_file}")
-        
-        # 绘制图表
-        plot_file = output_file.replace('.csv', '.png')
-        backtester.plot_results(plot_file)
-    else:
-        print("没有生成回测结果")
+        if not results_df.empty:
+            # 分析结果
+            timing_stats = backtester.analyze_results()
+            
+            # 保存详细结果
+            output_file = csv_file.replace('screening_results', 'backtest_results')
+            results_df.to_csv(output_file, index=False, encoding='utf-8-sig')
+            print(f"\n详细回测结果已保存到: {output_file}")
+            
+            # 保存统计摘要
+            if timing_stats is not None:
+                summary_file = csv_file.replace('screening_results', 'backtest_summary')
+                timing_stats.to_csv(summary_file, encoding='utf-8-sig')
+                print(f"统计摘要已保存到: {summary_file}")
+            
+            # 绘制图表
+            plot_file = output_file.replace('.csv', '.png')
+            backtester.plot_results(plot_file)
+        else:
+            print("没有生成回测结果")
+            
+        except Exception as e:
+            logger.error(f"回测过程出错: {e}", exc_info=True)
