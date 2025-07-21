@@ -49,6 +49,12 @@ uv run data_acquisition.py
 # Launch Jupyter for strategy analysis
 jupyter lab
 # Open dividend_strategy_analysis.ipynb
+
+# Run backtest with MongoDB data (requires MongoDB running)
+uv run backtest_simple.py
+
+# Run backtest directly from BaoStock (no MongoDB required)
+uv run backtest_simple_baostock.py
 ```
 
 ### Testing
@@ -84,6 +90,17 @@ uv run tests/
   - Calculate dividend yields
   - Find optimal entry/exit points
   - Backtest performance metrics
+
+- **backtest_simple.py**: Simplified backtesting using MongoDB data
+  - Tests multiple entry timing strategies
+  - Calculates actual returns based on historical prices
+  - Generates comprehensive performance reports
+
+- **backtest_simple_baostock.py**: Direct backtesting from BaoStock API
+  - No MongoDB dependency - fetches all data from BaoStock
+  - Same functionality as backtest_simple.py
+  - Includes data caching to minimize API calls
+  - Useful for testing without setting up MongoDB
 
 ### Database Schema
 MongoDB collections:
