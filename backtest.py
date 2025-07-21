@@ -436,29 +436,29 @@ if __name__ == "__main__":
     # 使用上下文管理器运行回测
     with DividendBacktest(csv_file) as backtester:
         try:
-        # 运行回测
-        results_df = backtester.run_backtest()
-        
-        if not results_df.empty:
-            # 分析结果
-            timing_stats = backtester.analyze_results()
+            # 运行回测
+            results_df = backtester.run_backtest()
             
-            # 保存详细结果
-            output_file = csv_file.replace('screening_results', 'backtest_results')
-            results_df.to_csv(output_file, index=False, encoding='utf-8-sig')
-            print(f"\n详细回测结果已保存到: {output_file}")
-            
-            # 保存统计摘要
-            if timing_stats is not None:
-                summary_file = csv_file.replace('screening_results', 'backtest_summary')
-                timing_stats.to_csv(summary_file, encoding='utf-8-sig')
-                print(f"统计摘要已保存到: {summary_file}")
-            
-            # 绘制图表
-            plot_file = output_file.replace('.csv', '.png')
-            backtester.plot_results(plot_file)
-        else:
-            print("没有生成回测结果")
+            if not results_df.empty:
+                # 分析结果
+                timing_stats = backtester.analyze_results()
+                
+                # 保存详细结果
+                output_file = csv_file.replace('screening_results', 'backtest_results')
+                results_df.to_csv(output_file, index=False, encoding='utf-8-sig')
+                print(f"\n详细回测结果已保存到: {output_file}")
+                
+                # 保存统计摘要
+                if timing_stats is not None:
+                    summary_file = csv_file.replace('screening_results', 'backtest_summary')
+                    timing_stats.to_csv(summary_file, encoding='utf-8-sig')
+                    print(f"统计摘要已保存到: {summary_file}")
+                
+                # 绘制图表
+                plot_file = output_file.replace('.csv', '.png')
+                backtester.plot_results(plot_file)
+            else:
+                print("没有生成回测结果")
             
         except Exception as e:
             logger.error(f"回测过程出错: {e}", exc_info=True)
